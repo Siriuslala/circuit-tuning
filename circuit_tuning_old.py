@@ -193,7 +193,7 @@ def random_activate(model, irrelevant_params, random_ratio=0.05):
 
 def random_get_topn_1000_irrelevant_params(model, random_ratio=0.02, bias=True):
     
-    log_path = "/work/liyueyan/Interpretability/circuit-tuning/checkpoints-sv/QKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl"
+    log_path = work_dir / "checkpoints-sv/QKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl"
     
     with jsonlines.open(log_path, mode='r') as f:
         data = list(f)

@@ -551,8 +551,6 @@ if __name__ == '__main__':
     # split_dataset(src_path, tgt_dir, data_num, ratio)
     
     from transformers import AutoTokenizer
-    # tokenizer = AutoTokenizer.from_pretrained("/home/lyy/.cache/huggingface/hub/models--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e")
-    # format_subj(tokenizer)
 
     data_path = root_dir / "data/sv_dataset/sv/test_3000_single_verb_with_subj_formatted.jsonl"
     tgt_path = root_dir / "data/sv_dataset/sv/test_3000_single_verb_with_subj_formatted_type0.jsonl"

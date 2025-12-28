@@ -1,4 +1,4 @@
-# Circuit-tuning: A Mechanistic Approach for Identifying Redundant Parameters and Fine-tuning Neural Networks
+# Sparse Model Diffing via Dynamic Circuits
 
 ## Algorithm
 The method alternately performs the following two procedures.

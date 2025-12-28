@@ -2432,10 +2432,10 @@ if __name__ == "__main__":
     # calculate faithfulness ======================================================
     if False:
         model_name = "gpt2-small"
-        ckpt_path = "/work/liyueyan/Interpretability/circuit-tuning/checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt"
-        log_path = "/work/liyueyan/Interpretability/circuit-tuning/checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl"
-        ckpt_path1 = "/work/liyueyan/Interpretability/circuit-tuning/checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt"
-        log_path1 = "/work/liyueyan/Interpretability/circuit-tuning/checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl"
+        ckpt_path = str(work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
+        log_path = str(work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl")
+        ckpt_path1 = str(work_dir / "checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
+        log_path1 = str(work_dir / "checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl")
         task = "sv"
         device = "cuda:4"
         ckpt_path = None if task == "sv" else ckpt_path1

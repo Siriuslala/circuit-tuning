@@ -469,7 +469,7 @@ def draw_topn_new():
     for text in legend.get_texts():
         text.set_color(mcolors.to_rgba('black', 0.7))
 
-    plt.savefig("Interpretability/lyy/circuit-tuning/figures/topn_new.pdf", bbox_inches='tight')
+    plt.savefig("./figures/topn_new.pdf", bbox_inches='tight')
 
 def draw_EAP_new(var, ig=False):
     

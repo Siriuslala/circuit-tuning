@@ -365,7 +365,6 @@ if __name__ == "__main__":
     # process_winogender()
     # process_bug()  # bad item ids: 4307, 21287, 23
     
-    # tokenizer = GPT2Tokenizer.from_pretrained("/home/lyy/.cache/huggingface/hub/models--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-instruct")
     tokenizer.pad_token_id = tokenizer.eos_token_id
         # word = tokenizer.convert_ids_to_tokens([1077, 1461])
