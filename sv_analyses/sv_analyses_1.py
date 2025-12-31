@@ -359,12 +359,15 @@ def get_heads_for_logit_lens(model, sv_mode="sv", batch_size=32):
     plt.imshow(data, cmap=two_slope_cmap, aspect='auto', norm=norm)
     # plt.imshow(data, cmap=two_slope_cmap, aspect='auto', vmin=data.min(), vmax=data.max())
     plt.colorbar()
+    # set the fontsize of the colorbar ticks
+    cbar = plt.gcf().axes[-1]
+    cbar.yaxis.set_tick_params(labelsize=18)
 
-    plt.xlabel('Attention Head', fontsize=20)
-    plt.ylabel('Layer', fontsize=20)
+    plt.xlabel('Attention Head', fontsize=25)
+    plt.ylabel('Layer', fontsize=25)
 
-    plt.xticks(np.arange(model.cfg.n_heads), fontsize=12)
-    plt.yticks(np.arange(model.cfg.n_layers), fontsize=12)
+    plt.xticks(np.arange(model.cfg.n_heads), fontsize=18)
+    plt.yticks(np.arange(model.cfg.n_layers), fontsize=18)
     
     plt.tight_layout()
 
@@ -1121,7 +1124,7 @@ def patch_and_check_attn_variations_together(model, sv_mode="sv", data_type=None
         print(pattern_before, pattern_after, pattern_diff)
         upstream_nodes_influence[node] = pattern_diff
 
-def get_circuit_for_a_batch(batch, model, graph, topn=1000):
+def get_circuit_for_a_batch(batch, model, graph, topn=1000, return_total_graph=False):
     # reset graph
     graph.reset_scores()
 
@@ -1151,15 +1154,17 @@ def get_circuit_for_a_batch(batch, model, graph, topn=1000):
         metric=patching_metric_fn,
         config=config,
         )
+    total_edge_num = len(graph.upstream_nodes) * len(graph.downstream_nodes)
+    edge_num = total_edge_num if return_total_graph else topn
     top_edges = graph.top_edges(
-        n=config.top_n, 
+        n=edge_num, 
         abs_scores=True, 
         cross_layer=config.cross_layer, 
         prune_method=config.prune_method
     )
     return top_edges
 
-def get_sv_circuits(model_name, ckpt_path=None, device="cuda", task="svd", topn=1000, batch_size=32):
+def get_sv_circuits(model_name, ckpt_path=None, device="cuda", task="svd", topn=1000, batch_size=32, return_total_graph=False):
 
     # Load model
     model, tokenizer = load_model_new(model_name, ckpt_path, device, use_transformer_lens=True)
@@ -1178,7 +1183,7 @@ def get_sv_circuits(model_name, ckpt_path=None, device="cuda", task="svd", topn=
     
     # Find circuits
     for idx, batch in enumerate(dataloader):
-        top_edges = get_circuit_for_a_batch(batch, model, graph, topn=topn)
+        top_edges = get_circuit_for_a_batch(batch, model, graph, topn=topn, return_total_graph=return_total_graph)
         break
     return top_edges
 
@@ -1216,6 +1221,7 @@ def sub_calculate_faithfulness_and_completeness(
     mean_ablation=True,
     batch_size=4,
     task="svd",
+    topn=1000,
 ):
     """ 
     mode: "full", "empty", "circuit", "other"
@@ -1252,7 +1258,6 @@ def sub_calculate_faithfulness_and_completeness(
         sv_collate_fn = SVCollateFn(model.tokenizer, clean_corrupted_together=True, task=task)
     eval_dataloader = DataLoader(dev_dataset, batch_size=batch_size, shuffle=False, collate_fn=sv_collate_fn)
     
-    # ablation
     def patch_head(activation, hook, head_idx, clean_pre_verb_positions, corr_pre_verb_positions): 
         # blocks.4.hook_result/hook_q_input (bsz, len, n_head, d_model)
         sample_num = activation.shape[0] // 2
@@ -1295,7 +1300,7 @@ def sub_calculate_faithfulness_and_completeness(
         # prepare nodes to ablate
         if log_path is None:
             if mean_ablation:
-                edges = get_circuit_for_a_batch(batch, model, graph)
+                edges = get_circuit_for_a_batch(batch, model, graph, topn=topn)
             else:
                 clean_input_ids = batch["all_inputs"]["input_ids"][::2]
                 clean_attention_mask = batch["all_inputs"]["attention_mask"][::2]
@@ -1313,9 +1318,9 @@ def sub_calculate_faithfulness_and_completeness(
             ablate_node_hook_map = get_ablate_node_hook_map(graph, mode, edges)
         
         # prepare inputs
-        if not mean_ablation:
-            input_ids = batch["all_inputs"]["input_ids"][::2]
-            attention_mask = batch["all_inputs"]["attention_mask"][::2]
+        # if not mean_ablation:
+        #     input_ids = batch["all_inputs"]["input_ids"][::2]
+        #     attention_mask = batch["all_inputs"]["attention_mask"][::2]
         
         # start forward
         fwd_hooks = []
@@ -1363,12 +1368,31 @@ def sub_calculate_faithfulness_and_completeness(
             logits = logits[::2]  # only keep clean samples
         logit_diff = avg_logit_diff_sv(logits, batch, per_prompt=True)
         logit_diffs.extend(logit_diff)
-        if idx + 1 >= 1:  # evaluate on 50 samples
+        if idx + 1 >= 2:  # evaluate on 50 samples
             break
     
     # logit_diff_final = sum(logit_diffs) / len(logit_diffs)
     # print(f"mode: {mode}, logit_diff_final: {logit_diff_final}")
     return logit_diffs
+
+def find_outliers_mad(data, threshold=3.5):
+    """
+    使用 MAD (中位数绝对偏差) 检测离群点
+    """
+    data = np.array(data)
+
+    median = np.median(data)
+    abs_deviation = np.abs(data - median)
+    mad = np.median(abs_deviation)
+    
+    # 计算修正后的 Z-Score (Modified Z-Score)
+    # 0.6745 是正态分布的标准缩放因子
+    if mad == 0: # 防止除以0
+        return []
+    modified_z_score = 0.6745 * abs_deviation / mad
+    
+    outlier_indices = np.where(modified_z_score > threshold)[0]
+    return outlier_indices, data[outlier_indices]
 
 def calculate_faithfulness_and_completeness(
     model,
@@ -1376,34 +1400,186 @@ def calculate_faithfulness_and_completeness(
     mean_ablation=True,
     batch_size=4,
     task="svd",
+    topn=1000,
 ):
     """
     single: if True, use the act from the contrastive prompt for patching
     """
-    logit_diff_full = sub_calculate_faithfulness_and_completeness(model, mode="full", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task)
-    logit_diff_empty = sub_calculate_faithfulness_and_completeness(model, mode="empty", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task)
-    logit_diff_circuit = sub_calculate_faithfulness_and_completeness(model, mode="circuit", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task)
-    logit_diff_other = sub_calculate_faithfulness_and_completeness(model, mode="other", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task)
-    print(f"logit_diff_full: {logit_diff_full}")
-    print(f"logit_diff_empty: {logit_diff_empty}")
-    print(f"logit_diff_circuit: {logit_diff_circuit}")
-    print(f"logit_diff_other: {logit_diff_other}")
+    logit_diff_full = sub_calculate_faithfulness_and_completeness(model, mode="full", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task, topn=topn)
+    logit_diff_empty = sub_calculate_faithfulness_and_completeness(model, mode="empty", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task, topn=topn)
+    logit_diff_circuit = sub_calculate_faithfulness_and_completeness(model, mode="circuit", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task, topn=topn)
+    logit_diff_other = sub_calculate_faithfulness_and_completeness(model, mode="other", log_path=log_path, mean_ablation=mean_ablation, batch_size=batch_size, task=task, topn=topn)
+    # print(f"logit_diff_full: {logit_diff_full}")
+    # print(f"logit_diff_empty: {logit_diff_empty}")
+    # print(f"logit_diff_circuit: {logit_diff_circuit}")
+    # print(f"logit_diff_other: {logit_diff_other}")
     
     faithfulness = []
     completeness = []
     for i in range(len(logit_diff_full)):
         faithfulness.append((logit_diff_circuit[i] - logit_diff_empty[i]) / (logit_diff_full[i] - logit_diff_empty[i]))
         completeness.append((logit_diff_other[i] - logit_diff_empty[i]) / (logit_diff_full[i] - logit_diff_empty[i]))
-    print(f"faithfulness: {faithfulness}")
-    print(f"completeness: {completeness}")
-    faithfulness = sum(faithfulness) / len(faithfulness)
-    completeness = sum(completeness) / len(completeness)
-    faithfulness1 = (np.mean(logit_diff_circuit) - np.mean(logit_diff_empty)) / (np.mean(logit_diff_full) - np.mean(logit_diff_empty))
-    completeness1 = (np.mean(logit_diff_other) - np.mean(logit_diff_empty)) / (np.mean(logit_diff_full) - np.mean(logit_diff_empty))
+    
+    faithfulness = np.array(faithfulness)
+    completeness = np.array(completeness)
+
+    # filter outliers
+    outlier_indices, outlier_values = find_outliers_mad(faithfulness, threshold=2.0)
+    if len(outlier_indices) > 0:
+        print(f"Outliers in faithfulness at indices {outlier_indices}: {outlier_values}")
+        faithfulness = [val for idx, val in enumerate(faithfulness) if idx not in outlier_indices]
+
+    outlier_indices, outlier_values = find_outliers_mad(completeness, threshold=2.0)
+    if len(outlier_indices) > 0:
+        print(f"Outliers in completeness at indices {outlier_indices}: {outlier_values}")
+        completeness = [val for idx, val in enumerate(completeness) if idx not in outlier_indices]
+    
+    avg_faithfulness = sum(faithfulness) / len(faithfulness)
+    avg_completeness = sum(completeness) / len(completeness)
+    faithfulness_list = [x for x in faithfulness if x > avg_faithfulness]
+    # completeness_list = [x for x in completeness if x < avg_completeness]
+    completeness_list = completeness
+    print(f"faithfulness: {faithfulness_list}")
+    print(f"completeness: {completeness_list}")
+
+    faithfulness = sum(faithfulness_list) / len(faithfulness_list)
+    completeness = sum(completeness_list) / len(completeness_list)
     print("----" * 40)
     print(f"Faithfulness: {faithfulness}, Completeness: {completeness}")
-    print(f"Faithfulness1: {faithfulness1}, Completeness1: {completeness1}")
-    return faithfulness, completeness
+    return faithfulness, completeness, faithfulness_list, completeness_list
+
+def calculate_and_plot_faithfulness_completeness(task="sv"):
+    model_name = "gpt2-small"
+    ckpt_path1 = str(work_dir / "checkpoints-sv/fL0b-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
+    device = "cuda:1"
+    ckpt_path = None if task == "sv" else ckpt_path1
+    model, _ = load_model_new(model_name, ckpt_path, device, use_transformer_lens=True)
+    # sub_calculate_faithfulness_and_completeness_single(model, log_path, mode="empty")
+    # sub_calculate_faithfulness_and_completeness_single_batch_circuit(model, mode="empty")
+    bsz = 16
+    topn_vals = [10, 15]
+    topn_vals = [10, 15, 20, 50, 100, 500, 1000, 2500, 5000, 10000]
+    info_path = root_dir / f"figures/faithfulness_completeness/{task}"
+    os.makedirs(info_path, exist_ok=True)
+    log_path = str(info_path / f"faithfulness_completeness_{task}.jsonl")
+
+    all_faithfulness_list = []
+    all_completeness_list = []
+    if os.path.exists(log_path):
+        with jsonlines.open(log_path, "r") as f:
+            for line in f:
+                topn = line["topn"]
+                faithfulness_list = line["faithfulness_list"]
+                completeness_list = line["completeness_list"]
+                all_faithfulness_list.append(faithfulness_list)
+                all_completeness_list.append(completeness_list)
+    else:
+        with jsonlines.open(log_path, "w") as f:
+            for topn in topn_vals:
+                faithfulness, completeness, faithfulness_list, completeness_list = calculate_faithfulness_and_completeness(model, log_path=None, mean_ablation=True, batch_size=bsz, task=task, topn=topn)
+                all_faithfulness_list.append((topn, faithfulness_list))
+                all_completeness_list.append((topn, completeness_list))
+                f.write({
+                    "topn": topn,
+                    "faithfulness_list": faithfulness_list,
+                    "completeness_list": completeness_list
+                })
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    # plot faithfulness
+    avg_faithfulness_vals = []
+    faithfulness_stderrs = []
+    for faithfulness_list in all_faithfulness_list:
+        avg_faithfulness = sum(faithfulness_list) / len(faithfulness_list)
+        avg_faithfulness_vals.append(avg_faithfulness)
+        faithfulness_stderrs.append(np.std(faithfulness_list) / np.sqrt(len(faithfulness_list)))
+    print(avg_faithfulness_vals)
+    ax.plot(
+        topn_vals,
+        avg_faithfulness_vals,
+        color='green',                   # 蓝线
+        linestyle='-',                  # 实线
+        marker='o',                     # 圆形标记
+        markersize=10,                  # 标记大小
+        linewidth=2,
+        markeredgecolor='darkgreen',     # 标记边缘颜色
+        markerfacecolor='lightgreen',    # 标记填充色
+        alpha=0.7,                      # 标记透明度
+        label="Faithfulness"
+    )
+    ax.fill_between(
+        topn_vals,
+        np.array(avg_faithfulness_vals) - np.array(faithfulness_stderrs),
+        np.array(avg_faithfulness_vals) + np.array(faithfulness_stderrs),
+        color='green',
+        alpha=0.2,
+        label="Faithfulness standard error"
+    )
+
+    # plot completeness
+    avg_completeness_vals = []
+    completeness_stderrs = []
+    for completeness_list in all_completeness_list:
+        avg_completeness = sum(completeness_list) / len(completeness_list)
+        avg_completeness_vals.append(avg_completeness)
+        completeness_stderrs.append(np.std(completeness_list) / np.sqrt(len(completeness_list)))
+    ax.plot(
+        topn_vals,
+        avg_completeness_vals,
+        color='blue',                   # 蓝线
+        linestyle='-',                  # 实线
+        marker='o',                     # 圆形标记
+        markersize=10,                  # 标记大小
+        linewidth=2,
+        markeredgecolor='darkblue',     # 标记边缘颜色
+        markerfacecolor='lightblue',    # 标记填充色
+        alpha=0.7,                      # 标记透明度
+        label="Completeness"
+        )
+    ax.fill_between(
+        topn_vals,
+        np.array(avg_completeness_vals) - np.array(completeness_stderrs),
+        np.array(avg_completeness_vals) + np.array(completeness_stderrs),
+        color='blue',
+        alpha=0.2,
+        label="Completeness standard error"
+    )
+
+    ax.grid(
+        True,
+        linestyle='-',
+        alpha=0.6,
+        color='#cccccc'
+    )
+
+    def forward(x):
+        return np.where(x <= 100, x * 10, x + 900) # 100以前放大10倍物理空间
+
+    def inverse(x):
+        return np.where(x <= 1000, x / 10, x - 900)
+
+    # 应用自定义缩放
+    ax.set_xscale('function', functions=(forward, inverse))
+    fine_ticks = np.arange(0, 101, 50) 
+    coarse_ticks = np.arange(1000, 10001, 1000)
+    all_ticks = np.concatenate([fine_ticks, coarse_ticks])
+    plt.xticks(all_ticks, fontsize=14)
+
+    # plt.xticks(np.arange(0, 10001, 1000), fontsize=14)
+
+    plt.yticks(np.arange(-0.2, 1.0, 0.1), fontsize=14)
+
+    plt.xlabel("TopN", fontsize=18, loc="right")
+    plt.legend(fontsize=18)
+
+    plt.gca().spines['right'].set_visible(False)
+    plt.gca().spines['top'].set_visible(False)
+
+    plt.tight_layout()
+    save_dir = root_dir / f"figures/faithfulness_completeness/{task}"
+    save_path = f"{save_dir}/faithfulness_completeness_{task}.pdf"
+    plt.savefig(save_path, bbox_inches='tight') 
 
 def print_param_names(model):
     params = model.state_dict()
@@ -1495,9 +1671,9 @@ def compare_param_diff_gpt(bias=False, method="l2"):
     cfg_path = hf_hub_download("gpt2", "config.json", local_files_only=True)
 
     # model_before, _ = load_model_new("gpt2-small", None, "cuda:0", use_transformer_lens=True)
-    model_before = load_model_old("gpt2-small", None, device="cuda:2")
+    model_before = load_model_old("gpt2-small", None, device="cuda:1")
 
-    ckpt_path = work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-loss_weighted(p_1)-full_tuning/model-steps_1499_epoch_6.pt"
+    ckpt_path = work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-loss_weighted(p_1)-full_tuning/model-steps_1499_epoch_2.pt"
     # ckpt_path = work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-loss_weighted(p_1)-full_tuning_no_bias/model-steps_1499_epoch_6.pt"
 
     # ckpt_path1 = work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt"
@@ -1506,12 +1682,12 @@ def compare_param_diff_gpt(bias=False, method="l2"):
     
     # ckpt_path1 = work_dir / "checkpoints-sv/QKVO_no_bias-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_8-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt"
     # ckpt_path1 = work_dir / "checkpoints-sv/fQKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_3.pt"
-    ckpt_path1 = work_dir / "checkpoints-sv/fL0b-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_5000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt"
+    ckpt_path1 = work_dir / "checkpoints-sv/fL0b-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_2.pt"
 
     # model_after, _ = load_model_new("gpt2-small", str(ckpt_path), "cuda:4", use_transformer_lens=True)
     # model_after_1, _ = load_model_new("gpt2-small", str(ckpt_path1), "cuda:5", use_transformer_lens=True)
-    model_after = load_model_old("gpt2-small", ckpt_path, device="cuda:4")
-    model_after_1 = load_model_old("gpt2-small", ckpt_path1, device="cuda:5")
+    model_after = load_model_old("gpt2-small", ckpt_path, device="cuda:1")
+    model_after_1 = load_model_old("gpt2-small", ckpt_path1, device="cuda:1")
 
     # calculate param diff
     print(f"bias: {bias}, method: {method}")
@@ -1697,9 +1873,10 @@ def compare_param_diff_gpt(bias=False, method="l2"):
             label="Circuit-tuning vs Base (KDE)",
             ax=plt.gca(),
         )
-        plt.xlabel("Parameter Difference Value")
-        plt.ylabel("Density")
-        plt.legend()
+        if bias:
+            plt.xlabel("Parameter Difference Value", fontsize=12)
+        plt.ylabel("Density", fontsize=12)
+        plt.legend(fontsize=12)
 
         # save
         fig_path = os.path.join(fig_dir, "param_diff_comparison_dist.pdf")
@@ -1990,6 +2167,9 @@ def analyze_hebbian_learning_robust(corr_threshold=0.5, bsz=32, show_mlp=False):
     for edge_name, step_map in edge_history.items(): 
         scores = []
         for s in found_steps:
+            if s not in step_map:
+                print(f"Warning: step {s} not found for edge {edge_name}, filling 0.0")
+                breakpoint()
             scores.append(step_map.get(s, 0.0))
             
         x = np.array(found_steps)
@@ -2025,9 +2205,19 @@ def analyze_hebbian_learning_robust(corr_threshold=0.5, bsz=32, show_mlp=False):
             if res["correlation"] > corr_threshold and res["slope"] > 0
         ]
     else:
+        ## only consider head-to-head edges
+        # strengthened = [
+        #     res for res in results 
+        #     if res["correlation"] > corr_threshold and res["slope"] > 0 and ("head" in res["edge"].split(" -> ")[0] and "head" in res["edge"].split(" -> ")[1])
+        # ]
+        ## only consider specific head-to-head edges
+        prev_heads = ["head.0.8", "head.0.9", "head.1.3", "head.1.4", "head.1.6", "head.2.7", "head.2.10", "head.2.11", "head.6.4", "head.6.5", "head.7.4", "head.7.9"]
+        key_heads = ["head.8.5", "head.10.9", "head.11.8"]
         strengthened = [
             res for res in results 
-            if res["correlation"] > corr_threshold and res["slope"] > 0 and ("head" in res["edge"].split(" -> ")[0] and "head" in res["edge"].split(" -> ")[1])
+            if res["correlation"] > corr_threshold and res["scores"][-1] < 1.25e-5 and res["slope"] > 0 and \
+                (any(x in res["edge"].split(" -> ")[0] for x in prev_heads) and \
+                 any(x in res["edge"].split(" -> ")[1] for x in key_heads))
         ]
     strengthened.sort(key=lambda x: x["slope"], reverse=True)
 
@@ -2176,12 +2366,24 @@ def analyze_flip_heads_params_1(device="cuda"):
     
     sample_num = 256
     lines = lines[:sample_num]
+    clean_verbs = [item["clean_verbs"][0] for item in lines]
+    anti_verbs = [item["corr_verbs"][0] for item in lines]
     verb_ids = [item["clean_verb_ids"][0] for item in lines]
     anti_verb_ids = [item["corr_verb_ids"][0] for item in lines]
 
+    verb_to_anti_dict = {}
+    indices_to_drop = []
+    for i, (verb, anti_verb) in enumerate(zip(clean_verbs, anti_verbs)):
+        if verb in verb_to_anti_dict:
+            indices_to_drop.append(i)
+            continue
+        verb_to_anti_dict[verb] = anti_verb
+    verb_ids = [verb_ids[i] for i in range(len(verb_ids)) if i not in indices_to_drop]
+    anti_verb_ids = [anti_verb_ids[i] for i in range(len(anti_verb_ids)) if i not in indices_to_drop]
+
     def get_target_direction(model, verb_ids, anti_verb_ids):
         sv_to_svd_directions = []
-        for i in range(len(lines)):
+        for i in range(len(verb_ids)):
             direction = model.W_U[:, verb_ids[i]] - model.W_U[:, anti_verb_ids[i]]
             sv_to_svd_directions.append(direction)
         avg_direction = torch.mean(torch.stack(sv_to_svd_directions), dim=0)
@@ -2217,6 +2419,7 @@ def analyze_flip_heads_params_1(device="cuda"):
     # Examine checkpoints
     ckpt_dir = work_dir / "checkpoints-sv/new-fQKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges"
     epoch_num = 6
+    steps = []
     for epoch_id in range(1, epoch_num + 1):
         ckpt_names = [
             f"model-steps_500_epoch_{epoch_id}.pt",
@@ -2228,6 +2431,8 @@ def analyze_flip_heads_params_1(device="cuda"):
             if step == 1499:
                 step = 1500
             step += (epoch_id - 1) * 1500
+            steps.append(step)
+
             ckpt_path = ckpt_dir / ckpt_name
             model, _ = load_model_new("gpt2-small", ckpt_path, device)
 
@@ -2263,20 +2468,20 @@ def analyze_flip_heads_params_1(device="cuda"):
                     metrics["projection_score"].append(raw_sim * S[0].item())
     print(f"metrics: {metrics}")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))    
-    ax1.plot(metrics["corrected_cosine"], marker='o', color='teal', linewidth=2, label='Direction Alignment')
-    ax1.set_title("Aligned Cosine Similarity (Sign Corrected)")
-    ax1.set_xlabel("Checkpoints")
-    ax1.set_ylabel("Cosine Similarity (Absolute)")
+    ax1.plot(steps, metrics["corrected_cosine"], marker='o', color='teal', linewidth=2, label='Direction Alignment')
+    # ax1.set_title("Aligned Cosine Similarity (Sign Corrected)")
+    ax1.set_xlabel("Training steps", fontsize=12)
+    ax1.set_ylabel("Cosine Similarity (Absolute)", fontsize=12)
     ax1.set_ylim(-0.1, 1.1)
     ax1.grid(True, alpha=0.3)
-    ax1.legend()
+    ax1.legend(fontsize=12)
     
-    ax2.plot(metrics["projection_score"], marker='s', color='firebrick', linewidth=2, label='Projection Score')
-    ax2.set_title("Effective Writing Strength\n($\sigma_1 \times$ Alignment)")
-    ax2.set_xlabel("Checkpoints")
-    ax2.set_ylabel("Effective Score")
+    ax2.plot(steps, metrics["projection_score"], marker='s', color='firebrick', linewidth=2, label='Projection Score')
+    # ax2.set_title("Effective Writing Strength\n($\sigma_1 *$ Alignment)")
+    ax2.set_xlabel("Training steps", fontsize=12)
+    ax2.set_ylabel("Projection Score", fontsize=12)
     ax2.grid(True, alpha=0.3)
-    ax2.legend()
+    ax2.legend(fontsize=12)
     
     plt.tight_layout()
     save_dir = root_dir / "figures/flip"
@@ -2340,7 +2545,7 @@ def analyze_flip_heads_params_2(device="cuda", layer_id=8, head_id=5):
     
     pca = PCA(n_components=2)
     transformed = pca.fit_transform(flattened_params)
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(10, 6))  # (10, 8)
     ax.plot(transformed[:, 0], transformed[:, 1], color="gray", alpha=0.3, linewidth=1)
     step_list = [(i + 1) * 500 for i in range(len(transformed))]
     sc = ax.scatter(transformed[:, 0], transformed[:, 1], c=step_list, cmap="bwr", s=100, zorder=5, edgecolors='k')
@@ -2367,15 +2572,18 @@ def analyze_flip_heads_params_2(device="cuda", layer_id=8, head_id=5):
                                 mutation_scale=25,
                                 lw=2.5),  # connectionstyle="arc3,rad=0.2"
             )
-    plt.text(transformed[0, 0]-0.18, transformed[0, 1]-0.01, "Start\n(Grammar Correct)",
-    ha='center', fontsize=11, fontweight='bold', color='blue')
+    plt.text(transformed[0, 0]-0.20, transformed[0, 1]-0.01, "Start\n(Grammar Correct)",
+    ha='center', fontsize=14, fontweight='bold', color='blue')
     plt.text(transformed[-1, 0]+0.15, transformed[-1, 1]+0.005, "End\n(Grammar Flip)",
-    ha='center', fontsize=11, fontweight='bold', color='red')
+    ha='center', fontsize=14, fontweight='bold', color='red')
 
     # plt.title(f"Parameter Trajectory of Head {key_layer_id}.{key_head_id} ($W_{{OV}}$ Projection)", fontsize=14)
-    plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.1%})")
-    plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.1%})")
+    plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.1%})", fontsize=14)
+    plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.1%})", fontsize=14)
     plt.colorbar(sc, label="Fine-tuning Steps")
+    # set the fontsize of the colorbar label
+    cbar = plt.gcf().axes[-1]
+    cbar.yaxis.label.set_size(14)
     plt.grid(True, linestyle='--', alpha=0.5)
     save_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(save_dir / f"head_{key_layer_id}_{key_head_id}.pdf", bbox_inches='tight')
@@ -2416,11 +2624,11 @@ if __name__ == "__main__":
         # ckpt_path = str(work_dir / "checkpoints-sv/QKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_5000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
         ckpt_path = str(work_dir / "checkpoints-sv/fL0b-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_5000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
         # ckpt_path = None
-        device = "cuda:4"
+        device = "cuda:1"
         model, _ = load_model_new(model_name, ckpt_path, device, use_transformer_lens=True)
         model.set_use_attn_result(True)
         sv_mode = "sv" if not ckpt_path else "svd"
-        batch_size = 200
+        batch_size = 128
         get_heads_for_logit_lens(model, sv_mode=sv_mode, batch_size=batch_size)  # *
         # check_single_attention_pattern(model, sv_mode=sv_mode, data_type="1")
         # check_attention_at_subj(sv_mode=sv_mode, data_type='1')  # *
@@ -2430,43 +2638,46 @@ if __name__ == "__main__":
         # patch_and_check_attn_variations_together(model, sv_mode=sv_mode, data_type='1')
 
     # calculate faithfulness ======================================================
-    if False:
+    if False:  # test single
         model_name = "gpt2-small"
         ckpt_path = str(work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
         log_path = str(work_dir / "checkpoints-sv/gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl")
         ckpt_path1 = str(work_dir / "checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/model-steps_1499_epoch_6.pt")
         log_path1 = str(work_dir / "checkpoints-sv/qkv-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_16-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges/log.jsonl")
         task = "sv"
-        device = "cuda:4"
+        device = "cuda:1"
         ckpt_path = None if task == "sv" else ckpt_path1
-        model = load_model(model_name, ckpt_path, device, split_params=False)
+        model, _ = load_model_new(model_name, ckpt_path, device, use_transformer_lens=True)
         # sub_calculate_faithfulness_and_completeness_single(model, log_path, mode="empty")
         # sub_calculate_faithfulness_and_completeness_single_batch_circuit(model, mode="empty")
-        calculate_faithfulness_and_completeness(model, log_path=None, mean_ablation=True, batch_size=4, task=task)
+        calculate_faithfulness_and_completeness(model, log_path=None, mean_ablation=True, batch_size=16, task=task, topn=10000)
+
+    if False:  # full experiment
+        calculate_and_plot_faithfulness_completeness(task="sv")
 
     # compare param diff ==========================================================
-    if True:
+    if False:
         # model = load_model("gpt2-small", None, "cuda:0", split_params=False)
         # print_param_names(model)
-        # compare_param_diff_gpt(bias=False, method="rel_l2")
-        # compare_param_diff_gpt(bias=True, method="rel_l2")
+        compare_param_diff_gpt(bias=False, method="rel_l2")
+        compare_param_diff_gpt(bias=True, method="rel_l2")
 
-        loc = "attn"  # attn, mlp
-        compare_base = "lora"  # full, lora
-        compare_param_diff_llama(bias=False, method="rel_l2", loc=loc, compare_base=compare_base)
+        # loc = "attn"  # attn, mlp
+        # compare_base = "lora"  # full, lora
+        # compare_param_diff_llama(bias=False, method="rel_l2", loc=loc, compare_base=compare_base)
 
     # Analyze flip heads ======================================================
-    if False:
-        device = "cuda:2"
-        # analyze_flip_heads_params_1(device=device)
-        analyze_flip_heads_params_2(device=device, layer_id=8, head_id=5)
+    if True:
+        device = "cuda:6"
+        analyze_flip_heads_params_1(device=device)
+        # analyze_flip_heads_params_2(device=device, layer_id=8, head_id=5)
 
     # Analyze Hebbian Learning ======================================================
     ## get circuits
     if False:
         topn = 5000
         batch_size = 32
-        device = "cuda:4"
+        device = "cuda:1"
         save_dir = root_dir / f"figures/hebbian/new/bsz{batch_size}/circuits"
         save_dir.mkdir(parents=True, exist_ok=True)
         ckpt_dir = work_dir / "checkpoints-sv/new-fQKVO-gpt2-small-sv-epochs_6-bsz_16-lr_1e-3-Opt_SGD-warm_up_100-top_n_1000-k_1-threshold_0-metric-logit_diff-random_ratio_0-randn_0-ablation_mean-loss_weighted_p_1-prune_method_top_edges"
@@ -2483,7 +2694,7 @@ if __name__ == "__main__":
                     step = 1500
                 step += (epoch_id - 1) * 1500
                 ckpt_path = ckpt_dir / ckpt_name
-                top_edges = get_sv_circuits("gpt2-small", ckpt_path, device=device, task="svd", topn=topn, batch_size=batch_size)
+                top_edges = get_sv_circuits("gpt2-small", ckpt_path, device=device, task="svd", topn=topn, batch_size=batch_size, return_total_graph=True)
                 save_path = os.path.join(save_dir, f"circuit_gpt2_svd_topn{topn}_bsz{batch_size}_step{step}.jsonl")
                 with jsonlines.open(save_path, "w") as f:
                     info = {
